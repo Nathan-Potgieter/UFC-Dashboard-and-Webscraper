@@ -1,0 +1,293 @@
+---
+title: "README"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+rm(list = ls())
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# UFC Scraper and Dashboard
+
+This project aims to:
+
+1.  Scrape all available data on UFC fights and fighters:
+
+    1.  Fight and fighter data comes form www.ufcstats.com.
+    2.  Betting odds data comes from \_????\_
+
+2.  Display and visualize this data within an R shiny dashboard.
+
+Please note that is work is not intended for commercial gain. It is a task that was set to myself as a means to learn web-scraping and shiny dash-boarding skills. I decided to go with UFC data because I am a fan of MMA and the UFC and I was not satisfied by their official data visualization offerings.
+
+I am new to both web-scraping and dash-boarding, so if anyone happens across any errors or areas in need of improvement, please let me know at [nathan.potgieter56\@gmail.com](mailto:nathan.potgieter56@gmail.com).
+
+The userdefined functions used in this project are located in the functions.R file.
+
+## Web-Scraper
+
+The following packages are used in the web-scraping process:
+
+```{r message=FALSE, warning=FALSE}
+if( !require("pacman")) install.packages("pacman")
+pacman::p_load(rvest, tidyverse, anytime)
+```
+
+Here are the data-sets created:
+
+-   Fighter Data
+
+```{r}
+load("data/UFC_Fighters.rda")
+as_tibble(df_fighters_full)
+```
+
+-   Fight Data
+
+### Fetching Fighter Data
+
+The 'scrape_fighters_raw' function scrapes all the fighter data from a given url.
+
+```{r eval=FALSE, include=TRUE}
+source("functions.R")
+fighters_raw <- scrape_fighters_raw("http://www.ufcstats.com/statistics/fighters?char=a&page=all")
+save("fighters_raw", file = "data/fighters_raw.rda")
+```
+
+```{r eval=TRUE, include=FALSE}
+load("data/fighters_raw.rda")
+print(fighters_raw)
+```
+
+Only fighters with last name beginning with A are provided under this URL. Therefore, we have to loop this process over each letter in the alphabet to get the complete dataset.
+
+```{r eval=FALSE, include=TRUE}
+source("functions.R")
+# This creates a list of 26 urls, 
+# once for each letter of the alphabet
+url <- "http://www.ufcstats.com/statistics/fighters?char=a&page=all"
+lin <- gsub("a&page=all", "", url)
+links <- letters %>% map( ~ paste0(lin, ., "&page=all"))
+
+# This scrapes the figher data from each link and 
+# reduces each table into a single tibble
+df_fighters_raw <- links %>%
+    map(scrape_fighters_raw) %>%
+    reduce(union) %>% as_tibble()
+# save(df_fighters_raw, file = "df_fighters_raw.rda")
+
+```
+
+### Cleaning Fighter Data
+
+```{r}
+# Cleaning df_fighters_raw
+load("df_fighters_raw.rda")
+
+df_fighters <-
+df_fighters_raw %>%
+mutate( 
+    Name = paste(First_Name, Last_Name),
+    .before = First_Name,
+    across(all_of(c("Height","Weight", "Reach")), ~gsub("[[:punct:]]", "", .)),
+    #across(where(is.character), ~gsub("[[:space:]]", "", .)),
+    # across(where(is.character), ~gsub("lbs", "", .)),
+    Weight = gsub("lbs", "", Weight),
+    # across(where(is.character), ~ gsub("([a-z])([A-Z])", "\\1 \\2", .)),
+    across(where(is.character), trimws),
+    ht_ft = as.numeric(substring(Height, 1, 1)),
+    ht_inch = as.numeric(substring(Height, 2)),
+    Height = (0.3048*ht_ft) + (0.0254*ht_inch),
+    Reach = 0.00254*as.numeric(Reach)
+    ) %>% select(-ht_ft, - ht_inch) 
+
+save(df_fighters, file = "data/df_fighters.rda")
+```
+
+## Fetching Additional Data for Each Fighter
+
+By now, if you have been running this code localy, you may have noticed the inclusion of a url column in **df_fighters** and **df_fighters_raw**. This url's was scraped in tandem with the other fighter data. These url's allow us to view additional career stats for each fighter, see for example : <http://www.ufcstats.com/fighter-details/9e8f6c728eb01124>.
+
+In this next step I loop another scraping function (X in functions.R) over each of these url's and then join the resulting output to **df_fighters.**
+
+The additional features include:
+
+-   DOB - Date of birth.
+-   SLpm - Significant Strikes Landed per Minute.
+-   SApM - Significant Strike Accuracy.
+-   SApM - Significant Strikes Absorbed per Minute.
+-   Str_Def - Significant Strike Defence (the % of opponents strikes that did not land).
+-   TD_Avg - Average Takedowns Landed per 15 minutes.
+-   TD_Acc - Takedown Accuracy.
+-   TD_Def - Takedown Defense (the % of opponents TD attempts that did not land).
+-   Sub_Avg - Average Submissions Attempted per 15 minutes.
+
+```{r eval=FALSE, include=TRUE}
+source("functions.R")
+load("data/UFC_Fighters.rda")
+# Warning this step takes +-30 minuets.
+fighter_stats_raw <- UFC_Fighters$Fighter_URL %>% 
+    map(scrape_fighter_stats_raw)
+# save(fighter_stats_raw, file = "data/df_fighter_stats_raw.rda")
+```
+
+Now to format the new data
+
+```{r}
+load("data/df_fighter_stats_raw.rda")
+
+fighter_stats <-
+fighter_stats_raw %>% reduce(union) %>%
+    mutate(DOB = as.Date(anytime(DOB)),
+           across(contains("Acc")|contains("Def"), ~ gsub("%|\\.", "", .)),
+           across(contains("Acc")|contains("Def"), ~ as.numeric(.)/100),
+           across(-c("Fighter_URL", "DOB"), as.numeric))
+
+```
+
+Joining **fighter_stats** with **df_fighters**
+
+```{r}
+UFC_Fighters <-
+df_fighters %>%
+    inner_join( fighter_stats,
+               by = c("Fighter_URL" = "Fighter_URL"))
+save(UFC_Fighters, file = "data/UFC_Fighters.rda")
+```
+
+### Fetching Fight Data
+
+The code below scrapes the Name/date, Location and URL for every UFC event that has occurred to date as well as for the most recent upcoming event. All this information is located [here](http://www.ufcstats.com/statistics/events/completed?page=all).
+
+```{r eval=FALSE, include=TRUE}
+# Scraping links to fight event pages
+link <- "http://www.ufcstats.com/statistics/events/completed?page=all"
+site <- read_html(link) # All the HTML and CSS code from link.
+
+fight_events_dirty <-  site %>%
+    html_table(fill = T) %>%
+    .[[1]] %>% .[-1,] %>%
+    as_tibble() %>%
+    mutate(across(where(is.character), noquote),
+           across(where(is.character), ~gsub("[[:punct:]]", "", .)),
+           across(where(is.character), ~gsub("[[:space:]]", "", .))) %>%
+    mutate( url = site %>% # feed `main.page` to the next step
+            html_nodes(".b-statistics__table-content") %>% # get the CSS nodes
+            html_nodes("a") %>%
+            html_attr("href")
+    )
+# save(fight_events_dirty, file = "data/fight_events_dirty.rda")
+```
+
+Cleaning this data:
+
+```{r}
+load("data/fight_events_dirty.rda")
+
+month_names <- "January|February|March|April|May|June|July|August|September|October|November|December"
+
+fight_events <-
+    fight_events_dirty %>%
+    set_names(c("Event", "Location", "Event_URL")) %>%
+    mutate(Month = str_extract(Event, month_names),
+           Event = str_remove(Event, month_names)) %>%
+    separate(Event, into = c("Event", "Date"), sep = -6) %>%
+    separate(Date, into = c("Day", "Year"), sep = -4) %>%
+    unite(all_of(c("Month", "Day", "Year")), col = "Date", sep = "-") %>%
+    mutate(Date = as.Date(anytime(Date)),
+           across(all_of(c("Event", "Location")), ~ gsub("([a-z])([A-Z])", "\\1 \\2", .)),
+           Event = sub("UFCF", "UFC F", Event),
+           Event = gsub('(\\d|\\d\\d|\\d\\d\\d)', ' \\1 ', Event),
+           Event = gsub("vs ", " vs ", Event),
+           Event = trimws(Event, which = "both") ) %>%
+    select(Date, Event, Location, Event_URL)
+```
+
+Fetching more detail from **fight_events$url**
+
+```{r eval=FALSE, include=TRUE}
+source("functions.R")
+
+fights_raw <- fight_events$Event_URL %>% map(scrape_events)
+# save("data\fights_raw.rda")
+
+```
+
+Cleaning the Fight data:
+
+```{r}
+pacman::p_load(tidylog)
+load("data/fights_raw.rda")
+
+UFC_Fights <- 
+    fights_raw %>% 
+    #map2(.y = fight_events$Event_URL, ~ mutate(.x, Event_URL = .y) ) %>%
+    reduce(union) %>% 
+    inner_join(fight_events) %>%  # 100% match
+    select(Date, Event, Location, Event_URL, Win_Loss:Time) %>% 
+    mutate(
+        #Win_Loss = if_else( grepl("win", Win_Loss), "Win   Loss", "nc   nc"),
+        #Win_Loss = if(Date >= Sys.Date()) "TBC",
+        Win_Loss = if_else( Date >= Sys.Date(), "TBC   TBC", 
+                            if_else( grepl("win", Win_Loss), "Win   Loss", "NC   NC") ),
+        Fight = Fighter,
+        .before = Win_Loss
+        ) %>% 
+    separate_rows(c("Win_Loss", "Fighter", "Kd", "Str", "Td", "Sub"), sep = "\\s{2,}") %>% 
+    separate(Method, into = c("Method", "Method_Detail"), sep = '\\s+', fill = "right", extra = "merge") %>% 
+    mutate(
+        Fight = sub('\\n', " vs", Fight),
+        Fight = gsub('\\s+', " ", Fight),
+        across(all_of(c("Kd", "Str", "Td", "Str", "Td", "Sub")), as.integer)
+        ) 
+
+save(UFC_Fights, file = "data/UFC_Fights.rda")
+```
+
+## Putting it All Together
+```{r}
+load("data/UFC_Fighters.rda")
+load("data/UFC_Fights.rda")
+
+UFC_Data <- UFC_Fights %>% 
+    inner_join(UFC_Fighters,  # Fix URL names in each Source
+               by = c("Fighter" = "Name")) %>% 
+    select(Date:Other,DOB:Sub_Avg, Fighter_URL)
+
+save(UFC_Data, file = "data/UFC_Data")
+load("data/UFC_Data.rda")
+
+# UFC_Data %>% filter( grepl("Conor McGregor", Fight, fixed = TRUE) ) %>% View()
+# UFC_Fights %>% filter(Fighter == "Justin Gaethje")
+# UFC_Fighters %>% filter(Name == "Conor Mc Gregor") # Need to fix missalignment
+
+```
+
+
+```{r}
+load("data/UFC_Fighters.rda")
+load("data/UFC_Fights.rda")
+load("data/UFC_Data")
+UFC_Data %>% filter( grepl("Conor McGregor", Fight, fixed = TRUE) )
+
+
+
+n <- 10
+order_by <- "SLpM"
+
+UFC_Fighters %>% 
+    arrange( desc(order_by) ) %>% 
+    slice_max(order_by = SLpM, n = n) %>% 
+    ggplot( aes(x = Name, y = order_by, fill = DOB) ) + 
+    geom_col() + 
+    coord_flip()
+
+
+```
+
+
+```{r}
+write_csv(UFC_Fighters, file = "data/UFC_Fighters.csv")
+```
+
