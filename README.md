@@ -34,7 +34,7 @@ if( !require("pacman")) install.packages("pacman")
 pacman::p_load(rvest, tidyverse, anytime)
 ```
 
-Here are the data-sets created:
+Here are the dataframes created by the webscraper:
 
 -   Fighter Data
 
